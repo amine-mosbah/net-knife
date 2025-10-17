@@ -1,113 +1,215 @@
 #!/usr/bin/env python3
 """
-PoC async TCP connect scanner (plain text streaming).
-Save as netknife_poc.py and run: python3 netknife_poc.py 192.168.1.0/28 --ports 22-1024 --concurrency 200
+NetKnife CLI - interactive menu scaffold + python version assertion.
+
+Run: python3 cli/netknife.py
 """
 
-import asyncio
-import argparse
-import ipaddress
-import socket
-from typing import List, Iterable
 import sys
+import os
+import argparse
+import asyncio
+import shutil
+from pathlib import Path
+from typing import Optional, Dict
 
-DEFAULT_PORTS = "1-1024"
+# ---------------------------
+# Python version assertion
+# ---------------------------
+MIN_PY = (3, 11)
+MAX_PY = (3, 13)  # exclusive upper bound (so 3.13 is not allowed)
 
-def parse_ports(range_str: str) -> List[int]:
-    parts = range_str.split(",")
-    ports = set()
-    for p in parts:
-        if "-" in p:
-            a, b = p.split("-", 1)
-            ports.update(range(int(a), int(b)+1))
+if not (sys.version_info >= MIN_PY and sys.version_info < MAX_PY):
+    sys.stderr.write(
+        f"ERROR: NetKnife requires Python >= {MIN_PY[0]}.{MIN_PY[1]} and < {MAX_PY[0]}.{MAX_PY[1]}\n"
+        f"You are running Python {sys.version_info.major}.{sys.version_info.minor}.\n"
+        "Please install a compatible Python version (pyenv recommended).\n"
+    )
+    sys.exit(2)
+
+# ---------------------------
+# Basic configuration & helpers
+# ---------------------------
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+SESSION_DIR = Path.home() / ".local" / "share" / "netknife" / "sessions"
+SESSION_DIR.mkdir(parents=True, exist_ok=True)
+
+DEFAULTS: Dict[str, object] = {
+    "concurrency": 200,
+    "ports": "1-1024",
+    "timeout": 3.0,
+    "use_prompt_toolkit": True,
+}
+# override with env var if set
+DEFAULTS["concurrency"] = int(os.getenv("NETKNIFE_CONCURRENCY", DEFAULTS["concurrency"]))
+
+# ---------------------------
+# Import optional nice UI lib
+# ---------------------------
+USE_PROMPT_TOOLKIT = False
+try:
+    from prompt_toolkit import prompt
+    from prompt_toolkit.completion import WordCompleter
+    USE_PROMPT_TOOLKIT = True
+except Exception:
+    USE_PROMPT_TOOLKIT = False
+
+# ---------------------------
+# Import our scanning module (PoC)
+# ---------------------------
+# We'll import the helper tcp scanner module (you can also ship it as a package)
+try:
+    # prefer local module path
+    import importlib.util
+    tcp_scan_path = PROJECT_ROOT / "modules" / "py_tcp_scan" / "tcp_scan.py"
+    if tcp_scan_path.exists():
+        spec = importlib.util.spec_from_file_location("tcp_scan", str(tcp_scan_path))
+        tcp_scan = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(tcp_scan)  # type: ignore
+    else:
+        tcp_scan = None
+except Exception as e:
+    tcp_scan = None
+
+# ---------------------------
+# CLI helper functions
+# ---------------------------
+def clear_screen():
+    if shutil.which("clear"):
+        os.system("clear")
+
+def header():
+    print("=" * 60)
+    print("NetKnife — interactive network scanner (CLI scaffold)")
+    print("Python version:", f"{sys.version_info.major}.{sys.version_info.minor}")
+    print("Session dir:", SESSION_DIR)
+    print("=" * 60)
+
+def print_settings():
+    print("Current settings:")
+    print(f"  Concurrency: {DEFAULTS['concurrency']}")
+    print(f"  Port range:  {DEFAULTS['ports']}")
+    print(f"  Timeout:     {DEFAULTS['timeout']}s")
+    print("")
+
+# ---------------------------
+# Menu actions (hooks)
+# ---------------------------
+async def action_tcp_connect_scan():
+    if tcp_scan is None:
+        print("[!] tcp_scan module not found. Please create modules/py_tcp_scan/tcp_scan.py")
+        return
+    # get target from user
+    target = input("Target (IP, CIDR, or hostname): ").strip()
+    if not target:
+        print("No target provided.")
+        return
+    ports = input(f"Ports [{DEFAULTS['ports']}]: ").strip() or DEFAULTS['ports']
+    concurrency = input(f"Concurrency [{DEFAULTS['concurrency']}]: ").strip()
+    concurrency = int(concurrency) if concurrency else DEFAULTS["concurrency"]
+    timeout = input(f"Timeout seconds [{DEFAULTS['timeout']}]: ").strip()
+    timeout = float(timeout) if timeout else float(DEFAULTS["timeout"])
+    print(f"Starting TCP connect scan -> {target} ports={ports} concurrency={concurrency} timeout={timeout}")
+    # run the async scan implemented in tcp_scan.py
+    await tcp_scan.run_scan(target, ports, concurrency, timeout)
+
+def action_masscan_wrapper():
+    print("[masscan wrapper] Not implemented yet. This will call masscan if installed.")
+    if shutil.which("masscan") is None:
+        print("masscan not found on PATH. Install masscan or add wrapper.")
+    else:
+        print("masscan found. (Wrapper placeholder)")
+
+def action_nmap_wrapper():
+    print("[nmap wrapper] Not implemented yet. This will call nmap if installed.")
+    if shutil.which("nmap") is None:
+        print("nmap not found on PATH. Install nmap if desired.")
+    else:
+        print("nmap found. (Wrapper placeholder)")
+
+def action_settings_menu():
+    print("Settings (press Enter to keep current):")
+    ports = input(f"Port range [{DEFAULTS['ports']}]: ").strip() or DEFAULTS["ports"]
+    concurrency = input(f"Concurrency [{DEFAULTS['concurrency']}]: ").strip()
+    concurrency = int(concurrency) if concurrency else DEFAULTS["concurrency"]
+    timeout = input(f"Timeout seconds [{DEFAULTS['timeout']}]: ").strip()
+    timeout = float(timeout) if timeout else DEFAULTS["timeout"]
+    DEFAULTS["ports"] = ports
+    DEFAULTS["concurrency"] = concurrency
+    DEFAULTS["timeout"] = timeout
+    print("Settings updated.")
+    print_settings()
+
+# ---------------------------
+# Menu engine
+# ---------------------------
+MENU_ITEMS = [
+    ("1", "TCP Connect scan (safe, non-root)", action_tcp_connect_scan),
+    ("2", "Run masscan (fast)", action_masscan_wrapper),
+    ("3", "Run nmap (wrapper)", action_nmap_wrapper),
+    ("4", "Settings", action_settings_menu),
+    ("5", "Exit", None),
+]
+
+async def run_menu_loop():
+    while True:
+        clear_screen()
+        header()
+        print_settings()
+        print("Select an option:")
+        for k, label, _ in MENU_ITEMS:
+            print(f"  {k}. {label}")
+        print("")
+        choice = ""
+        if USE_PROMPT_TOOLKIT and DEFAULTS.get("use_prompt_toolkit", True):
+            completer = WordCompleter([k for k, _, _ in MENU_ITEMS], ignore_case=True)
+            try:
+                choice = prompt("Choice> ", completer=completer).strip()
+            except KeyboardInterrupt:
+                print("\nInterrupted. Exiting.")
+                return
         else:
-            ports.add(int(p))
-    return sorted([pt for pt in ports if 1 <= pt <= 65535])
-
-def expand_targets(target: str) -> Iterable[str]:
-    # If CIDR
-    try:
-        if "/" in target:
-            net = ipaddress.ip_network(target, strict=False)
-            for ip in net.hosts():
-                yield str(ip)
-            return
-        # If single IP
-        ipaddress.ip_address(target)
-        yield target
-        return
-    except ValueError:
-        # Try resolve as hostname
-        try:
-            infos = socket.getaddrinfo(target, None)
-            seen = set()
-            for info in infos:
-                addr = info[4][0]
-                if addr not in seen:
-                    seen.add(addr)
-                    yield addr
-            return
-        except Exception:
-            raise
-
-async def try_connect(semaphore: asyncio.Semaphore, ip: str, port: int, timeout: float=3.0):
-    async with semaphore:
-        try:
-            reader, writer = await asyncio.wait_for(asyncio.open_connection(ip, port), timeout=timeout)
-            # Connected
-            banner = b""
             try:
-                # try to read small banner (non-blocking)
-                writer.write(b"\r\n")
-                await writer.drain()
-                await asyncio.sleep(0.1)
-                if not reader.at_eof():
-                    banner = await asyncio.wait_for(reader.read(1024), timeout=0.5)
-            except Exception:
-                pass
-            writer.close()
-            try:
-                await writer.wait_closed()
-            except Exception:
-                pass
-            banner_text = (" " + banner.decode(errors="replace").strip()) if banner else ""
-            print(f"[OPEN] {ip}:{port}{banner_text}")
-            sys.stdout.flush()
-            return (ip, port, True, banner_text)
-        except (asyncio.TimeoutError, ConnectionRefusedError, OSError):
-            # closed or filtered
-            return (ip, port, False, "")
-        except Exception as e:
-            # Unexpected
-            return (ip, port, False, "")
+                choice = input("Choice> ").strip()
+            except KeyboardInterrupt:
+                print("\nInterrupted. Exiting.")
+                return
 
-async def scan_targets(targets: List[str], ports: List[int], concurrency: int):
-    sem = asyncio.Semaphore(concurrency)
-    tasks = []
-    for ip in targets:
-        for p in ports:
-            tasks.append(try_connect(sem, ip, p))
-    # Run tasks with progress streaming
-    for fut in asyncio.as_completed(tasks):
-        await fut  # try_connect prints results directly
+        matched = [item for item in MENU_ITEMS if item[0] == choice]
+        if not matched:
+            print("Invalid choice. Press Enter to continue...")
+            input()
+            continue
+        if choice == "5":
+            print("Goodbye.")
+            return
+        # call the action (may be async)
+        action = matched[0][2]
+        if asyncio.iscoroutinefunction(action):
+            await action()
+        else:
+            # run sync action inside executor if we want to keep UI responsive
+            result = action()
+            # if action returned an awaitable, await it
+            if asyncio.iscoroutine(result):
+                await result
+        print("\nScan/Action finished. Press Enter to return to menu...")
+        input()
 
+# ---------------------------
+# CLI entrypoint
+# ---------------------------
 def main():
-    parser = argparse.ArgumentParser(description="NetKnife PoC TCP connect scanner (async).")
-    parser.add_argument("target", help="IP, CIDR, or hostname (e.g., 192.168.1.0/28 or example.com)")
-    parser.add_argument("--ports", default=DEFAULT_PORTS, help="Port list like 22,80,443 or range 1-1024")
-    parser.add_argument("--concurrency", type=int, default=200, help="Max concurrent connections")
+    parser = argparse.ArgumentParser(description="NetKnife CLI scaffold")
+    parser.add_argument("--no-prompt-toolkit", action="store_true", help="Disable fancy interactive menu")
     args = parser.parse_args()
+    if args.no_prompt_toolkit:
+        DEFAULTS["use_prompt_toolkit"] = False
 
-    ports = parse_ports(args.ports)
-    # expand targets
     try:
-        targets = list(expand_targets(args.target))
-    except Exception as e:
-        print("Error resolving target:", e)
-        return
-
-    print(f"Scanning {len(targets)} target(s) × {len(ports)} ports (concurrency={args.concurrency})")
-    asyncio.run(scan_targets(targets, ports, args.concurrency))
+        asyncio.run(run_menu_loop())
+    except KeyboardInterrupt:
+        print("\nExiting...")
 
 if __name__ == "__main__":
     main()
