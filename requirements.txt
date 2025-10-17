@@ -1,3 +1,6 @@
 # CLI + optional niceties
 prompt_toolkit>=3.0.40    # optional -- better interactive menus
 aiohttp>=3.8.5
+# For optional DNS lookups & parsing (used later)
+dnspython>=2.6.1
+

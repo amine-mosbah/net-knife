@@ -28,12 +28,12 @@ def expand_targets(target: str) -> Iterable[str]:
             for ip in net.hosts():
                 yield str(ip)
             return
-        # If single IP
+        # Single IP
         ipaddress.ip_address(target)
         yield target
         return
     except ValueError:
-        # Try resolve as hostname
+        # Resolve hostname
         infos = socket.getaddrinfo(target, None)
         seen = set()
         for info in infos:
@@ -43,7 +43,7 @@ def expand_targets(target: str) -> Iterable[str]:
                 yield addr
         return
 
-async def try_connect(semaphore: asyncio.Semaphore, ip: str, port: int, timeout: float=3.0):
+async def try_connect(semaphore: asyncio.Semaphore, ip: str, port: int, timeout: float = 3.0):
     async with semaphore:
         try:
             reader, writer = await asyncio.wait_for(asyncio.open_connection(ip, port), timeout=timeout)
@@ -76,11 +76,12 @@ async def run_scan_async(targets: List[str], ports: List[int], concurrency: int,
     for ip in targets:
         for p in ports:
             tasks.append(try_connect(sem, ip, p, timeout=timeout))
-    # Use as_completed to stream results as they arrive
+    # Stream results as they complete
     for fut in asyncio.as_completed(tasks):
-        await fut  # try_connect prints directly
+        await fut
 
-def run_scan(target: str, ports: str = DEFAULT_PORTS, concurrency: int = 200, timeout: float = 3.0):
+async def run_scan(target: str, ports: str = DEFAULT_PORTS, concurrency: int = 200, timeout: float = 3.0):
+    """Async entrypoint used by the CLI (we're already in an event loop)."""
     ports_list = parse_ports(ports)
     try:
         targets = list(expand_targets(target))
@@ -89,4 +90,16 @@ def run_scan(target: str, ports: str = DEFAULT_PORTS, concurrency: int = 200, ti
         return
     total = len(targets) * len(ports_list)
     print(f"Scanning {len(targets)} target(s) × {len(ports_list)} ports (total {total})")
-    asyncio.run(run_scan_async(targets, ports_list, concurrency, timeout))
+    await run_scan_async(targets, ports_list, concurrency, timeout)
+
+# Optional: allow running this module directly for quick tests
+if __name__ == "__main__":
+    # Only here we are allowed to create the loop with asyncio.run()
+    import argparse
+    parser = argparse.ArgumentParser(description="NetKnife TCP connect scanner module")
+    parser.add_argument("target", help="IP, CIDR, or hostname")
+    parser.add_argument("--ports", default=DEFAULT_PORTS)
+    parser.add_argument("--concurrency", type=int, default=200)
+    parser.add_argument("--timeout", type=float, default=3.0)
+    args = parser.parse_args()
+    asyncio.run(run_scan(args.target, args.ports, args.concurrency, args.timeout))
